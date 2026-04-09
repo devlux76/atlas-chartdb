@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Atlas ChartDB – Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0d0d1a;
+      color: #c8c8dc;
+      min-height: 100vh;
+    }
+    header {
+      padding: 16px 24px;
+      background: #1a1a2e;
+      border-bottom: 1px solid #3a3a5c;
+      display: flex; align-items: center; gap: 16px;
+    }
+    header h1 { font-size: 1.4rem; color: #e0e0f0; }
+    header small { color: #8888aa; font-size: 0.8rem; }
+    .controls {
+      padding: 12px 24px;
+      background: #1a1a2e;
+      border-bottom: 1px solid #2a2a44;
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    }
+    .controls label { font-size: 0.82rem; color: #aaaacc; }
+    select, button {
+      background: #252540;
+      color: #d0d0e8;
+      border: 1px solid #4a4a70;
+      border-radius: 4px;
+      padding: 5px 10px;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    button:hover { background: #30305a; }
+    .chart-grid {
+      padding: 16px 24px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+      gap: 20px;
+    }
+    .chart-card {
+      background: #1a1a2e;
+      border: 1px solid #2e2e50;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .chart-card header {
+      padding: 10px 16px;
+      font-size: 0.85rem;
+      color: #aaaacc;
+      border: none;
+      background: #222238;
+    }
+    .chart-card canvas { display: block; width: 100%; }
+    .info-bar {
+      padding: 4px 16px;
+      font-size: 0.78rem;
+      color: #8888aa;
+      background: #1a1a2e;
+      border-top: 1px solid #2a2a44;
+      min-height: 22px;
+    }
+    #statusBar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      padding: 6px 24px;
+      background: #111122;
+      border-top: 1px solid #2a2a44;
+      font-size: 0.78rem;
+      color: #8888aa;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⚡ Atlas ChartDB</h1>
+    <small>WebAssembly-powered financial charting · renders directly to canvas</small>
+  </header>
+
+  <div class="controls">
+    <label>Bars:
+      <select id="barsSelect">
+        <option value="60">60</option>
+        <option value="120" selected>120</option>
+        <option value="365">365</option>
+        <option value="1000">1000</option>
+      </select>
+    </label>
+    <button id="btnRegenerate">↺ Regenerate</button>
+    <button id="btnSaveOpfs">💾 Save to OPFS</button>
+    <button id="btnLoadOpfs">📂 Load from OPFS</button>
+    <label style="margin-left:auto; color:#6677aa;">
+      Scroll to zoom · Drag to pan
+    </label>
+  </div>
+
+  <div class="chart-grid" id="chartGrid">
+    <!-- cards injected by demo.ts -->
+  </div>
+
+  <div id="statusBar">Initialising WebAssembly…</div>
+
+  <script type="module" src="./demo.ts"></script>
+</body>
+</html>

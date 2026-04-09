@@ -1,0 +1,21 @@
+{
+  "name": "atlas-chartdb",
+  "version": "0.1.0",
+  "description": "WebAssembly-powered charting library with direct canvas rendering",
+  "type": "module",
+  "scripts": {
+    "build:wat": "bun scripts/build-wat.ts",
+    "build:ts": "bun tsc --noEmit && bun vite build",
+    "build": "bun run build:wat && bun run build:ts",
+    "dev": "bun run build:wat && bun vite",
+    "preview": "bun vite preview",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.5.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "wabt": "^1.0.39"
+  }
+}
