@@ -22,6 +22,60 @@ export function packRGBA(r: number, g: number, b: number, a = 255): number {
 
 // Scratch pointer inside WASM memory for small data transfers (e.g. get_ohlcv_at)
 const SCRATCH_PTR = 0x3100;   // start of scratch area
+const LOAD_BIN_STAGING_PTR = 0x3200;
+const BIN_MAGIC = 0x434C5441;
+const BIN_VERSION = 0x30314244;
+const BIN_HEADER_BYTES = 72;
+const OHLCV_RECORD_BYTES = 48;
+const TIME_VALUE_RECORD_BYTES = 16;
+
+function packOhlcvBin(records: OhlcvRecord[]): Uint8Array {
+  const buffer = new ArrayBuffer(BIN_HEADER_BYTES + records.length * OHLCV_RECORD_BYTES);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  view.setUint32(0, BIN_MAGIC, true);
+  view.setUint32(4, BIN_VERSION, true);
+  view.setUint32(8, DatasetType.OHLCV, true);
+  view.setBigInt64(12, BigInt(records.length), true);
+  view.setBigInt64(20, BigInt(records[0]?.timestamp ?? 0), true);
+  view.setBigInt64(28, BigInt(records[records.length - 1]?.timestamp ?? 0), true);
+
+  let offset = BIN_HEADER_BYTES;
+  for (const record of records) {
+    view.setBigInt64(offset, BigInt(record.timestamp), true);
+    view.setFloat64(offset + 8, record.open, true);
+    view.setFloat64(offset + 16, record.high, true);
+    view.setFloat64(offset + 24, record.low, true);
+    view.setFloat64(offset + 32, record.close, true);
+    view.setFloat64(offset + 40, record.volume, true);
+    offset += OHLCV_RECORD_BYTES;
+  }
+
+  return bytes;
+}
+
+function packTimeValueBin(records: TimeValueRecord[]): Uint8Array {
+  const buffer = new ArrayBuffer(BIN_HEADER_BYTES + records.length * TIME_VALUE_RECORD_BYTES);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  view.setUint32(0, BIN_MAGIC, true);
+  view.setUint32(4, BIN_VERSION, true);
+  view.setUint32(8, DatasetType.TimeValue, true);
+  view.setBigInt64(12, BigInt(records.length), true);
+  view.setBigInt64(20, BigInt(records[0]?.timestamp ?? 0), true);
+  view.setBigInt64(28, BigInt(records[records.length - 1]?.timestamp ?? 0), true);
+
+  let offset = BIN_HEADER_BYTES;
+  for (const record of records) {
+    view.setBigInt64(offset, BigInt(record.timestamp), true);
+    view.setFloat64(offset + 8, record.value, true);
+    offset += TIME_VALUE_RECORD_BYTES;
+  }
+
+  return bytes;
+}
 
 // ── AtlasChart ───────────────────────────────────────────────────────────────
 
@@ -36,6 +90,7 @@ export class AtlasChart extends EventTarget {
   private wasm!: AtlasWasmExports;
   private wasmUrl: string;
   private _ready = false;
+  private _eventController: AbortController | null = null;
 
   // interaction state
   private _isPanning = false;
@@ -64,8 +119,36 @@ export class AtlasChart extends EventTarget {
 
   get ready(): boolean { return this._ready; }
 
+  destroy(): void {
+    this._eventController?.abort();
+    this._eventController = null;
+    if (this._animFrame) {
+      cancelAnimationFrame(this._animFrame);
+      this._animFrame = 0;
+    }
+    this._isPanning = false;
+    this._dirty = false;
+    this._ready = false;
+  }
+
   private _requireReady(): void {
     if (!this._ready) throw new Error("AtlasChart.init() has not been called yet");
+  }
+
+  private _ensureMemoryCapacity(requiredBytes: number): void {
+    const memBytes = this.wasm.memory.buffer.byteLength;
+    if (requiredBytes <= memBytes) return;
+    const extraPages = Math.ceil((requiredBytes - memBytes) / 65536);
+    this.wasm.memory.grow(extraPages);
+  }
+
+  private _loadPackedDataset(data: Uint8Array): number {
+    this._requireReady();
+    const requiredBytes = LOAD_BIN_STAGING_PTR + data.length;
+    this._ensureMemoryCapacity(requiredBytes);
+    const mem = new Uint8Array(this.wasm.memory.buffer);
+    mem.set(data, LOAD_BIN_STAGING_PTR);
+    return this.wasm.load_bin(LOAD_BIN_STAGING_PTR, data.length);
   }
 
   // ── canvas / display ──────────────────────────────────────────────────────
@@ -104,16 +187,8 @@ export class AtlasChart extends EventTarget {
    * Records must be in ascending timestamp order.
    */
   loadOhlcv(records: OhlcvRecord[]): number {
-    this._requireReady();
-    const id = this.wasm.begin_dataset(DatasetType.OHLCV);
-    if (id < 0) throw new Error("Dataset registry is full (max 32)");
-    for (const r of records) {
-      this.wasm.write_ohlcv(
-        BigInt(r.timestamp),
-        r.open, r.high, r.low, r.close, r.volume,
-      );
-    }
-    this.wasm.end_dataset();
+    const id = this._loadPackedDataset(packOhlcvBin(records));
+    if (id < 0) throw new Error("Failed to load OHLCV dataset into Wasm");
     return id;
   }
 
@@ -122,13 +197,8 @@ export class AtlasChart extends EventTarget {
    * Records must be in ascending timestamp order.
    */
   loadTimeValue(records: TimeValueRecord[]): number {
-    this._requireReady();
-    const id = this.wasm.begin_dataset(DatasetType.TimeValue);
-    if (id < 0) throw new Error("Dataset registry is full (max 32)");
-    for (const r of records) {
-      this.wasm.write_tv(BigInt(r.timestamp), r.value);
-    }
-    this.wasm.end_dataset();
+    const id = this._loadPackedDataset(packTimeValueBin(records));
+    if (id < 0) throw new Error("Failed to load time-value dataset into Wasm");
     return id;
   }
 
@@ -140,19 +210,7 @@ export class AtlasChart extends EventTarget {
     this._requireReady();
     const data = await readDatasetBin(name);
     if (!data) return -1;
-    // Ensure WASM memory is large enough for the staging area + payload.
-    // Framebuffer starts at 0x010000; staging is at 0x3200 (well before framebuffer).
-    // If data is large we grow memory so the copy stays inside bounds.
-    const staging = 0x3200;
-    const needed  = staging + data.length;
-    const memBytes = this.wasm.memory.buffer.byteLength; // current size in bytes
-    if (needed > memBytes) {
-      const extra = Math.ceil((needed - memBytes) / 65536);
-      this.wasm.memory.grow(extra);
-    }
-    const mem = new Uint8Array(this.wasm.memory.buffer);
-    mem.set(data, staging);
-    return this.wasm.load_bin(staging, data.length);
+    return this._loadPackedDataset(data);
   }
 
   /**
@@ -161,18 +219,13 @@ export class AtlasChart extends EventTarget {
   async saveToOpfs(dsId: number, name: string): Promise<void> {
     this._requireReady();
     const cnt  = this.wasm.get_ds_record_count(dsId);
-    const staging = 0x3200;
-    // Header (72 B) + records (max 48 B each)
-    const required = staging + 72 + cnt * 48;
-    const memBytes = this.wasm.memory.buffer.byteLength;
-    if (required > memBytes) {
-      const extra = Math.ceil((required - memBytes) / 65536);
-      this.wasm.memory.grow(extra);
-    }
-    const written = this.wasm.serialize_dataset(dsId, staging);
+    const maxRecordBytes = Math.max(OHLCV_RECORD_BYTES, TIME_VALUE_RECORD_BYTES);
+    const required = LOAD_BIN_STAGING_PTR + BIN_HEADER_BYTES + cnt * maxRecordBytes;
+    this._ensureMemoryCapacity(required);
+    const written = this.wasm.serialize_dataset(dsId, LOAD_BIN_STAGING_PTR);
     if (written < 0) throw new Error(`serialize_dataset returned ${written}`);
     const mem   = new Uint8Array(this.wasm.memory.buffer);
-    const slice = mem.slice(staging, staging + written);
+    const slice = mem.slice(LOAD_BIN_STAGING_PTR, LOAD_BIN_STAGING_PTR + written);
     await writeDatasetBin(name, slice);
   }
 
@@ -196,6 +249,11 @@ export class AtlasChart extends EventTarget {
     this._markDirty();
   }
 
+  getViewRange(): ViewRange {
+    this._requireReady();
+    return this._getViewRange();
+  }
+
   autoScalePrice(): void {
     this._requireReady();
     this.wasm.auto_scale_price();
@@ -206,6 +264,14 @@ export class AtlasChart extends EventTarget {
     this._requireReady();
     this.wasm.set_price_range(min, max);
     this._markDirty();
+  }
+
+  getPriceRange(): { min: number; max: number } {
+    this._requireReady();
+    return {
+      min: this.wasm.get_price_min(),
+      max: this.wasm.get_price_max(),
+    };
   }
 
   fitToData(dsId?: number): void {
@@ -317,16 +383,19 @@ export class AtlasChart extends EventTarget {
   // ── event handling ────────────────────────────────────────────────────────
 
   private _attachEvents(): void {
-    this.canvas.addEventListener("mousemove",  this._onMouseMove.bind(this));
-    this.canvas.addEventListener("mouseleave", this._onMouseLeave.bind(this));
-    this.canvas.addEventListener("mousedown",  this._onMouseDown.bind(this));
-    window.addEventListener("mouseup",         this._onMouseUp.bind(this));
-    this.canvas.addEventListener("click",       this._onClick.bind(this));
-    this.canvas.addEventListener("wheel",       this._onWheel.bind(this), { passive: false });
-    // touch
-    this.canvas.addEventListener("touchstart",  this._onTouchStart.bind(this), { passive: false });
-    this.canvas.addEventListener("touchmove",   this._onTouchMove.bind(this),  { passive: false });
-    this.canvas.addEventListener("touchend",    this._onTouchEnd.bind(this));
+    this._eventController?.abort();
+    this._eventController = new AbortController();
+    const signal = this._eventController.signal;
+
+    this.canvas.addEventListener("mousemove", this._onMouseMove.bind(this), { signal });
+    this.canvas.addEventListener("mouseleave", this._onMouseLeave.bind(this), { signal });
+    this.canvas.addEventListener("mousedown", this._onMouseDown.bind(this), { signal });
+    window.addEventListener("mouseup", this._onMouseUp.bind(this), { signal });
+    this.canvas.addEventListener("click", this._onClick.bind(this), { signal });
+    this.canvas.addEventListener("wheel", this._onWheel.bind(this), { passive: false, signal });
+    this.canvas.addEventListener("touchstart", this._onTouchStart.bind(this), { passive: false, signal });
+    this.canvas.addEventListener("touchmove", this._onTouchMove.bind(this), { passive: false, signal });
+    this.canvas.addEventListener("touchend", this._onTouchEnd.bind(this), { signal });
   }
 
   private _canvasXY(e: MouseEvent | Touch): { x: number; y: number } {
@@ -427,10 +496,9 @@ export class AtlasChart extends EventTarget {
   // ── pan / zoom helpers ────────────────────────────────────────────────────
 
   private _getViewRange(): ViewRange {
-    const mem = new DataView(this.wasm.memory.buffer);
     return {
-      start: Number(mem.getBigInt64(32, true)),
-      end:   Number(mem.getBigInt64(40, true)),
+      start: Number(this.wasm.get_view_start()),
+      end: Number(this.wasm.get_view_end()),
     };
   }
 

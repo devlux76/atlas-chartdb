@@ -571,9 +571,21 @@
     (i64.store offset=32 (i32.const 0) (local.get $start))
     (i64.store offset=40 (i32.const 0) (local.get $end)))
 
+  (func (export "get_view_start") (result i64)
+    (call $view_s))
+
+  (func (export "get_view_end") (result i64)
+    (call $view_e))
+
   (func (export "set_price_range") (param $pmin f64) (param $pmax f64)
     (f64.store offset=48 (i32.const 0) (local.get $pmin))
     (f64.store offset=56 (i32.const 0) (local.get $pmax)))
+
+  (func (export "get_price_min") (result f64)
+    (call $pmin))
+
+  (func (export "get_price_max") (result f64)
+    (call $pmax))
 
   (func (export "set_crosshair") (param $x i32) (param $y i32)
     (i32.store offset=128 (i32.const 0) (local.get $x))

@@ -94,8 +94,12 @@ export interface AtlasWasmExports {
   set_active_ds(id: number): void;
   set_chart_type(type: number): void;
   set_view_range(start: bigint, end: bigint): void;
+  get_view_start(): bigint;
+  get_view_end(): bigint;
   auto_scale_price(): void;
   set_price_range(min: number, max: number): void;
+  get_price_min(): number;
+  get_price_max(): number;
   set_crosshair(x: number, y: number): void;
   begin_dataset(type: number): number;
   write_ohlcv(ts: bigint, open: number, high: number, low: number, close: number, vol: number): void;
