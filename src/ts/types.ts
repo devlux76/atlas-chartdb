@@ -7,7 +7,7 @@ export type PackedColor = number;
 export type TimestampMs = number;
 
 /** Chart types */
-export const enum ChartType {
+export enum ChartType {
   Candlestick = 0,
   Line        = 1,
   Area        = 2,
@@ -17,13 +17,13 @@ export const enum ChartType {
 }
 
 /** Dataset types */
-export const enum DatasetType {
+export enum DatasetType {
   OHLCV      = 0,  // 48 bytes per record
   TimeValue  = 1,  // 16 bytes per record
 }
 
 /** Indicator types */
-export const enum IndicatorType {
+export enum IndicatorType {
   SMA  = 0,
   EMA  = 1,
   BB   = 2,   // Bollinger Bands
@@ -87,6 +87,8 @@ export interface AtlasWasmExports {
   set_theme(bg: number, grid: number, text: number, up: number, down: number, line: number): void;
   set_margins(left: number, top: number, right: number, bottom: number): void;
   set_show_volume(show: number, panelH: number): void;
+  set_ind_panel(show: number, height: number): void;
+  auto_scale_ind_panel(): void;
   clear(): void;
   render_chart(): void;
   set_active_ds(id: number): void;

@@ -92,6 +92,13 @@
   (func $mb (result i32) (i32.load offset=124 (i32.const 0)))
   (func $show_vol  (result i32) (i32.load offset=136 (i32.const 0)))
   (func $vol_h     (result i32) (i32.load offset=140 (i32.const 0)))
+  ;; indicator sub-panel
+  (func $ind_ps   (result i32) (i32.load  offset=144 (i32.const 0))) ;; show indicator panel
+  (func $ind_ph   (result i32) (i32.load  offset=148 (i32.const 0))) ;; indicator panel height
+  (func $ind_pmin (result f64) (f64.load  offset=152 (i32.const 0))) ;; indicator panel y min
+  (func $ind_pmax (result f64) (f64.load  offset=160 (i32.const 0))) ;; indicator panel y max
+  ;; text colour (set by set_theme as the $text parameter, stored at offset 84)
+  (func $text_col (result i32) (i32.load  offset=84  (i32.const 0)))
 
   (func $recalc_chart_area
     (i32.store offset=8  (i32.const 0) (call $ml))
@@ -99,9 +106,10 @@
     (i32.store offset=16 (i32.const 0)
       (i32.sub (i32.sub (call $cw) (call $ml)) (call $mr)))
     (i32.store offset=20 (i32.const 0)
-      (i32.sub (i32.sub (i32.sub
+      (i32.sub (i32.sub (i32.sub (i32.sub
         (call $ch) (call $mt)) (call $mb))
-        (select (call $vol_h) (i32.const 0) (call $show_vol)))))
+        (select (call $vol_h) (i32.const 0) (call $show_vol)))
+        (select (call $ind_ph) (i32.const 0) (call $ind_ps)))))
 
   ;; ── framebuffer ──────────────────────────────────────────────────────
   (func $fb_off (param $x i32) (param $y i32) (result i32)
@@ -461,9 +469,16 @@
     ;; volume panel
     (i32.store offset=136 (i32.const 0) (i32.const 1))
     (i32.store offset=140 (i32.const 0) (i32.const 80))
+    ;; indicator sub-panel (off by default)
+    (i32.store offset=144 (i32.const 0) (i32.const 0))
+    (i32.store offset=148 (i32.const 0) (i32.const 70))
+    (f64.store offset=152 (i32.const 0) (f64.const 0))
+    (f64.store offset=160 (i32.const 0) (f64.const 100))
     ;; crosshair off
     (i32.store offset=128 (i32.const 0) (i32.const -1))
     (i32.store offset=132 (i32.const 0) (i32.const -1))
+    ;; initialise 3×5 pixel font data
+    (call $init_font)
     ;; recalculate chart area
     (call $recalc_chart_area))
 
@@ -499,6 +514,51 @@
     (i32.store offset=136 (i32.const 0) (local.get $show))
     (i32.store offset=140 (i32.const 0) (local.get $panel_h))
     (call $recalc_chart_area))
+
+  ;; Configure the indicator sub-panel (RSI / MACD panel below main chart)
+  (func (export "set_ind_panel") (param $show i32) (param $h i32)
+    (i32.store offset=144 (i32.const 0) (local.get $show))
+    (i32.store offset=148 (i32.const 0) (local.get $h))
+    (call $recalc_chart_area))
+
+  ;; Auto-scale the indicator panel range from all RSI/MACD indicator values
+  (func (export "auto_scale_ind_panel")
+    (local $n i32) (local $i i32) (local $ip i32) (local $type i32)
+    (local $dp i32) (local $cnt i32) (local $j i32) (local $v f64)
+    (local $mn f64) (local $mx f64)
+    (local.set $mn (f64.const 1e15))
+    (local.set $mx (f64.const -1e15))
+    (local.set $n (call $ind_count))
+    (local.set $i (i32.const 0))
+    (block $brk (loop $lp
+      (br_if $brk (i32.ge_s (local.get $i) (local.get $n)))
+      (local.set $ip   (call $ind_ptr (local.get $i)))
+      (local.set $type (i32.load offset=4  (local.get $ip)))
+      (if (i32.and (i32.load offset=60 (local.get $ip))
+                   (i32.or (i32.eq (local.get $type) (i32.const 5))
+                           (i32.eq (local.get $type) (i32.const 6))))
+        (then
+          (local.set $dp  (i32.load offset=48 (local.get $ip)))
+          (local.set $cnt (i32.load offset=52 (local.get $ip)))
+          (local.set $j (i32.const 0))
+          (block $ib (loop $il
+            (br_if $ib (i32.ge_s (local.get $j) (local.get $cnt)))
+            (local.set $v (f64.load (i32.add (local.get $dp) (i32.shl (local.get $j) (i32.const 3)))))
+            (if (f64.ne (local.get $v) (f64.const 0))
+              (then
+                (if (f64.lt (local.get $v) (local.get $mn)) (then (local.set $mn (local.get $v))))
+                (if (f64.gt (local.get $v) (local.get $mx)) (then (local.set $mx (local.get $v))))))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $il)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    ;; clamp for RSI (0-100 range); for MACD use symmetric range
+    (if (f64.lt (local.get $mn) (f64.const 1e14))
+      (then
+        (local.set $mn (f64.sub (local.get $mn) (f64.mul (f64.sub (local.get $mx) (local.get $mn)) (f64.const 0.05))))
+        (local.set $mx (f64.add (local.get $mx) (f64.mul (f64.sub (local.get $mx) (local.get $mn)) (f64.const 0.05))))
+        (f64.store offset=152 (i32.const 0) (local.get $mn))
+        (f64.store offset=160 (i32.const 0) (local.get $mx)))))
 
   (func (export "set_active_ds") (param $id i32)
     (i32.store offset=24 (i32.const 0) (local.get $id)))
@@ -643,16 +703,29 @@
   (func (export "load_bin") (param $src i32) (param $len i32) (result i32)
     (local $id i32) (local $type i32) (local $cnt i64)
     (local $rsz i32) (local $dsz i32) (local $rp i32) (local $dst i32)
+    (local $required i32)
     (if (i32.lt_s (local.get $len) (i32.const 72)) (then (return (i32.const -1))))
-    ;; check magic "ATLC"
+    ;; check magic "ATLC" (0x434C5441)
     (if (i32.ne (i32.load (local.get $src)) (i32.const 0x434C5441))
       (then (return (i32.const -1))))
+    ;; check version "DB10" (0x30314244)
+    (if (i32.ne (i32.load offset=4 (local.get $src)) (i32.const 0x30314244))
+      (then (return (i32.const -1))))
     (local.set $type (i32.load offset=8  (local.get $src)))
+    ;; type must be 0 (OHLCV) or 1 (TimeValue)
+    (if (i32.gt_u (local.get $type) (i32.const 1)) (then (return (i32.const -1))))
     (local.set $cnt  (i64.load offset=12 (local.get $src)))
-    (local.set $id   (call $begin_dataset (local.get $type)))
-    (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return (i32.const -1))))
+    ;; cnt must be non-negative and fit in a reasonable bound (≤ 1 million records)
+    (if (i32.or (i64.lt_s (local.get $cnt) (i64.const 0))
+                (i64.gt_s (local.get $cnt) (i64.const 1000000)))
+      (then (return (i32.const -1))))
     (local.set $rsz (select (i32.const 48) (i32.const 16) (i32.eqz (local.get $type))))
     (local.set $dsz (i32.mul (i32.wrap_i64 (local.get $cnt)) (local.get $rsz)))
+    ;; verify buffer length covers header + records
+    (local.set $required (i32.add (i32.const 72) (local.get $dsz)))
+    (if (i32.lt_s (local.get $len) (local.get $required)) (then (return (i32.const -1))))
+    (local.set $id (call $begin_dataset (local.get $type)))
+    (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return (i32.const -1))))
     (local.set $dst (global.get $g_stor_cur))
     (memory.copy (local.get $dst)
                  (i32.add (local.get $src) (i32.const 72))
@@ -726,35 +799,47 @@
   ;; $compute_indicators allocates ind value arrays from $g_stor_cur
   (func (export "compute_indicators")
     (local $n i32) (local $i i32) (local $ip i32) (local $type i32) (local $dsid i32)
-    (local $period i32) (local $cnt i32) (local $out i32) (local $sz i32)
+    (local $period i32) (local $cnt i32) (local $out i32) (local $sz i32) (local $enabled i32)
     (local.set $n (call $ind_count))
     (local.set $i (i32.const 0))
     (block $brk (loop $lp
       (br_if $brk (i32.ge_s (local.get $i) (local.get $n)))
-      (local.set $ip     (call $ind_ptr (local.get $i)))
-      (local.set $type   (i32.load offset=4  (local.get $ip)))
-      (local.set $dsid   (i32.load offset=8  (local.get $ip)))
-      (local.set $period (i32.load offset=12 (local.get $ip)))
-      (local.set $cnt    (call $ds_cnt (local.get $dsid)))
-      ;; allocate output array
-      (local.set $out (global.get $g_stor_cur))
-      (local.set $sz  (i32.shl (local.get $cnt) (i32.const 3)))  ;; cnt * 8
-      (i32.store offset=48 (local.get $ip) (local.get $out))
-      (i32.store offset=52 (local.get $ip) (local.get $cnt))
-      (global.set $g_stor_cur (i32.add (local.get $out) (local.get $sz)))
-      ;; dispatch
-      (if (i32.eqz (local.get $type))
-        (then (call $compute_sma (local.get $dsid) (local.get $period) (local.get $out) (local.get $cnt))))
-      (if (i32.eq (local.get $type) (i32.const 1))
-        (then (call $compute_ema (local.get $dsid) (local.get $period) (local.get $out) (local.get $cnt))))
-      (if (i32.eq (local.get $type) (i32.const 2))
+      (local.set $ip      (call $ind_ptr (local.get $i)))
+      (local.set $enabled (i32.load offset=60 (local.get $ip)))
+      (if (local.get $enabled)
         (then
-          (call $compute_bb (local.get $ip) (local.get $dsid) (local.get $period)
-                            (local.get $out) (local.get $cnt))))
-      (if (i32.eq (local.get $type) (i32.const 5))
-        (then (call $compute_rsi (local.get $dsid) (local.get $period) (local.get $out) (local.get $cnt))))
-      (if (i32.eq (local.get $type) (i32.const 6))
-        (then (call $compute_macd (local.get $ip) (local.get $dsid) (local.get $out) (local.get $cnt))))
+          (local.set $type   (i32.load offset=4  (local.get $ip)))
+          (local.set $dsid   (i32.load offset=8  (local.get $ip)))
+          (local.set $period (i32.load offset=12 (local.get $ip)))
+          (local.set $cnt    (call $ds_cnt (local.get $dsid)))
+          ;; BB and MACD need 3 output arrays (mid/upper/lower or line/signal/hist)
+          (local.set $sz (i32.shl (local.get $cnt) (i32.const 3)))  ;; cnt * 8
+          (local.set $sz (select
+            (i32.mul (local.get $sz) (i32.const 3))
+            (local.get $sz)
+            (i32.or (i32.eq (local.get $type) (i32.const 2))
+                    (i32.eq (local.get $type) (i32.const 6)))))
+          (local.set $out (global.get $g_stor_cur))
+          (i32.store offset=48 (local.get $ip) (local.get $out))
+          (i32.store offset=52 (local.get $ip) (local.get $cnt))
+          (global.set $g_stor_cur (i32.add (local.get $out) (local.get $sz)))
+          ;; dispatch
+          (if (i32.eqz (local.get $type))
+            (then (call $compute_sma (local.get $dsid) (local.get $period) (local.get $out) (local.get $cnt))))
+          (if (i32.eq (local.get $type) (i32.const 1))
+            (then (call $compute_ema (local.get $dsid) (local.get $period) (local.get $out) (local.get $cnt))))
+          (if (i32.eq (local.get $type) (i32.const 2))
+            (then
+              (call $compute_bb (local.get $ip) (local.get $dsid) (local.get $period)
+                                (local.get $out) (local.get $cnt))))
+          (if (i32.eq (local.get $type) (i32.const 5))
+            (then (call $compute_rsi (local.get $dsid) (local.get $period) (local.get $out) (local.get $cnt))))
+          (if (i32.eq (local.get $type) (i32.const 6))
+            (then (call $compute_macd (local.get $ip) (local.get $dsid) (local.get $out) (local.get $cnt)))))
+        (else
+          ;; disabled: clear output pointers so the renderer skips it
+          (i32.store offset=48 (local.get $ip) (i32.const 0))
+          (i32.store offset=52 (local.get $ip) (i32.const 0))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
@@ -979,6 +1064,302 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
+  ;; ── 3×5 pixel font (15-bit row-major bitmaps, stored at 0x3E00) ────────────
+  ;; Index:  0-9 = digits, 10='.', 11='-', 12=' ', 13=':', 14='K', 15='M'
+  ;; Encoding: bits[14:12]=row0, bits[11:9]=row1, …, bits[2:0]=row4  (MSB=left)
+  (func $init_font
+    (i32.store (i32.const 0x3E00) (i32.const 31599))  ;; '0' ###/#.#/#.#/#.#/###
+    (i32.store (i32.const 0x3E04) (i32.const 11415))  ;; '1' .#./##./.#./.#./###
+    (i32.store (i32.const 0x3E08) (i32.const 29671))  ;; '2' ###/..#/###/#../###
+    (i32.store (i32.const 0x3E0C) (i32.const 29391))  ;; '3' ###/..#/.##/..#/###
+    (i32.store (i32.const 0x3E10) (i32.const 23497))  ;; '4' #.#/#.#/###/..#/..#
+    (i32.store (i32.const 0x3E14) (i32.const 31183))  ;; '5' ###/#../###/..#/###
+    (i32.store (i32.const 0x3E18) (i32.const 31215))  ;; '6' ###/#../###/#.#/###
+    (i32.store (i32.const 0x3E1C) (i32.const 29257))  ;; '7' ###/..#/..#/..#/..#
+    (i32.store (i32.const 0x3E20) (i32.const 31727))  ;; '8' ###/#.#/###/#.#/###
+    (i32.store (i32.const 0x3E24) (i32.const 31695))  ;; '9' ###/#.#/###/..#/###
+    (i32.store (i32.const 0x3E28) (i32.const 2))      ;; '.' .../.../.../.../. #.
+    (i32.store (i32.const 0x3E2C) (i32.const 448))    ;; '-' .../.../ ###/.../...
+    (i32.store (i32.const 0x3E30) (i32.const 0))      ;; ' ' blank
+    (i32.store (i32.const 0x3E34) (i32.const 1040))   ;; ':' .../.#./.../.#./...
+    (i32.store (i32.const 0x3E38) (i32.const 23469))  ;; 'K' #.#/#.#/##./#.#/#.#
+    (i32.store (i32.const 0x3E3C) (i32.const 31597))) ;; 'M' ###/#.#/#.#/#.#/#.#
+
+  ;; Draw a single 3×5 character (index $idx) at pixel (x, y) in colour $col
+  (func $draw_char (param $x i32) (param $y i32) (param $idx i32) (param $col i32)
+    (local $bits i32) (local $row i32) (local $rbits i32)
+    (local.set $bits (i32.load (i32.add (i32.const 0x3E00) (i32.shl (local.get $idx) (i32.const 2)))))
+    (local.set $row (i32.const 0))
+    (block $brk (loop $lp
+      (br_if $brk (i32.ge_s (local.get $row) (i32.const 5)))
+      ;; extract 3 bits for this row: bits[(4-row)*3 + 2 : (4-row)*3]
+      (local.set $rbits
+        (i32.and
+          (i32.shr_u (local.get $bits)
+            (i32.mul (i32.sub (i32.const 4) (local.get $row)) (i32.const 3)))
+          (i32.const 7)))
+      (if (i32.and (local.get $rbits) (i32.const 4))
+        (then (call $fb_blend (local.get $x)
+                (i32.add (local.get $y) (local.get $row)) (local.get $col))))
+      (if (i32.and (local.get $rbits) (i32.const 2))
+        (then (call $fb_blend (i32.add (local.get $x) (i32.const 1))
+                (i32.add (local.get $y) (local.get $row)) (local.get $col))))
+      (if (i32.and (local.get $rbits) (i32.const 1))
+        (then (call $fb_blend (i32.add (local.get $x) (i32.const 2))
+                (i32.add (local.get $y) (local.get $row)) (local.get $col))))
+      (local.set $row (i32.add (local.get $row) (i32.const 1)))
+      (br $lp))))
+
+  ;; Write decimal digits of non-negative i64 into scratch buf at 0x3F00.
+  ;; Returns number of chars written.  Each byte is a font index (0-9 for digits,
+  ;; 10 for '.', 11 for '-').  Handles sign, integer and 1 optional decimal place.
+  ;; $decimals: number of decimal digits to show (0 or 1)
+  (func $fmt_price (param $val f64) (param $decimals i32) (result i32)
+    (local $neg i32) (local $int_part i64) (local $frac i64)
+    (local $n i32) (local $tmp i32) (local $rem i64) (local $c i32)
+    ;; scratch: 0x3F00 = char-index buffer (forward), 0x3F20 = reverse temp
+    (local.set $neg (i32.const 0))
+    (if (f64.lt (local.get $val) (f64.const 0))
+      (then
+        (local.set $neg (i32.const 1))
+        (local.set $val (f64.neg (local.get $val)))))
+    ;; round to 1 decimal place max
+    (if (local.get $decimals)
+      (then
+        (local.set $int_part (i64.trunc_sat_f64_s (local.get $val)))
+        (local.set $frac
+          (i64.trunc_sat_f64_s
+            (f64.nearest (f64.mul
+              (f64.sub (local.get $val) (f64.convert_i64_s (local.get $int_part)))
+              (f64.const 10))))))
+      (else
+        (local.set $int_part (i64.trunc_sat_f64_s (f64.nearest (local.get $val))))
+        (local.set $frac (i64.const 0))))
+    ;; write reversed digits into 0x3F20, then copy forward
+    (local.set $n (i32.const 0))
+    (local.set $rem (local.get $int_part))
+    (if (i64.eqz (local.get $rem))
+      (then
+        (i32.store8 (i32.const 0x3F20) (i32.const 0))
+        (local.set $n (i32.const 1)))
+      (else
+        (block $brk (loop $lp
+          (br_if $brk (i64.eqz (local.get $rem)))
+          (i32.store8 (i32.add (i32.const 0x3F20) (local.get $n))
+            (i32.wrap_i64 (i64.rem_u (local.get $rem) (i64.const 10))))
+          (local.set $rem (i64.div_u (local.get $rem) (i64.const 10)))
+          (local.set $n (i32.add (local.get $n) (i32.const 1)))
+          (br $lp)))))
+    ;; optional decimal suffix (digit + '.')
+    (if (local.get $decimals)
+      (then
+        (i32.store8 (i32.add (i32.const 0x3F20) (local.get $n)) (i32.wrap_i64 (local.get $frac)))
+        (local.set $n (i32.add (local.get $n) (i32.const 1)))
+        (i32.store8 (i32.add (i32.const 0x3F20) (local.get $n)) (i32.const 10)) ;; '.'
+        (local.set $n (i32.add (local.get $n) (i32.const 1)))))
+    ;; negative sign
+    (if (local.get $neg)
+      (then
+        (i32.store8 (i32.add (i32.const 0x3F20) (local.get $n)) (i32.const 11)) ;; '-'
+        (local.set $n (i32.add (local.get $n) (i32.const 1)))))
+    ;; reverse into 0x3F00
+    (local.set $tmp (i32.const 0))
+    (block $rb (loop $rl
+      (br_if $rb (i32.ge_s (local.get $tmp) (local.get $n)))
+      (i32.store8 (i32.add (i32.const 0x3F00) (local.get $tmp))
+        (i32.load8_u (i32.add (i32.const 0x3F20)
+          (i32.sub (i32.sub (local.get $n) (local.get $tmp)) (i32.const 1)))))
+      (local.set $tmp (i32.add (local.get $tmp) (i32.const 1)))
+      (br $rl)))
+    (local.get $n))
+
+  ;; Draw a string from the 0x3F00 buffer ($len chars) right-aligned ending at $x_end
+  (func $draw_rstr (param $x_end i32) (param $y i32) (param $len i32) (param $col i32)
+    (local $x i32) (local $j i32)
+    ;; each char is 3 pixels wide + 1 gap = 4 pixels; start x = x_end - len*4 + 1
+    (local.set $x (i32.sub (local.get $x_end) (i32.sub (i32.mul (local.get $len) (i32.const 4)) (i32.const 1))))
+    (local.set $j (i32.const 0))
+    (block $brk (loop $lp
+      (br_if $brk (i32.ge_s (local.get $j) (local.get $len)))
+      (call $draw_char (local.get $x) (local.get $y)
+        (i32.load8_u (i32.add (i32.const 0x3F00) (local.get $j)))
+        (local.get $col))
+      (local.set $x (i32.add (local.get $x) (i32.const 4)))
+      (local.set $j (i32.add (local.get $j) (i32.const 1)))
+      (br $lp))))
+
+  ;; Y-axis price labels: render 5 price values at the 5 grid line positions
+  (func $render_price_labels
+    (local $step f64) (local $val f64) (local $i i32) (local $y i32) (local $col i32)
+    (local $n i32)
+    (local.set $col (call $text_col))
+    (local.set $step (f64.div (f64.sub (call $pmax) (call $pmin)) (f64.const 5)))
+    (local.set $i (i32.const 0))
+    (block $brk (loop $lp
+      (br_if $brk (i32.gt_s (local.get $i) (i32.const 4)))
+      ;; value at this grid line (pmax at top, pmin at bottom; label at gridline i from bottom)
+      (local.set $val (f64.add (call $pmin) (f64.mul (f64.convert_i32_s (local.get $i)) (local.get $step))))
+      (local.set $y
+        (i32.sub (i32.add (call $cy) (call $cah))
+          (i32.trunc_sat_f64_s
+            (f64.mul (f64.div
+              (f64.sub (local.get $val) (call $pmin))
+              (f64.sub (call $pmax) (call $pmin)))
+              (f64.convert_i32_s (call $cah))))))
+      ;; format with 1 decimal if price < 100, else 0
+      (local.set $n (call $fmt_price (local.get $val)
+        (select (i32.const 1) (i32.const 0)
+          (f64.lt (call $abs_f64 (local.get $val)) (f64.const 100)))))
+      ;; right-align in left margin (end at cx-2)
+      (call $draw_rstr (i32.sub (call $cx) (i32.const 2))
+        (i32.sub (local.get $y) (i32.const 3)) (local.get $n) (local.get $col))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))))
+
+  ;; X-axis date labels: decode Unix-ms timestamp → day-of-month digits + "/" + month digits
+  ;; Simplified: just shows "DD" (day number) at ~4 evenly spaced positions along X axis
+  (func $render_time_labels
+    (local $id i32) (local $n i32) (local $s i32) (local $e i32) (local $step i32)
+    (local $i i32) (local $p i32) (local $ts i64) (local $day i64) (local $x i32)
+    (local $month i64) (local $dom i64) (local $col i32) (local $nc i32)
+    (local.set $id (call $active_ds))
+    (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return)))
+    (local.set $n (call $ds_cnt (local.get $id)))
+    (if (i32.eqz (local.get $n)) (then (return)))
+    (local.set $s (call $ds_lower_bound (local.get $id) (call $view_s)))
+    (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
+    (if (i32.ge_s (local.get $s) (local.get $e)) (then (return)))
+    (local.set $col (call $text_col))
+    ;; render ~5 labels evenly spaced across the visible range
+    (local.set $step (call $max_i32 (i32.const 1) (i32.div_u (i32.sub (local.get $e) (local.get $s)) (i32.const 4))))
+    (local.set $i (local.get $s))
+    (block $brk (loop $lp
+      (br_if $brk (i32.gt_s (local.get $i) (local.get $e)))
+      (local.set $p  (call $ds_rec_ptr (local.get $id) (local.get $i)))
+      (local.set $ts (i64.load (local.get $p)))
+      ;; days since Unix epoch = ts_ms / 86_400_000
+      (local.set $day (i64.div_u (local.get $ts) (i64.const 86400000)))
+      ;; simple day-of-month: day mod 30 + 1  (not calendar-accurate but avoids complex arithmetic)
+      (local.set $dom (i64.add (i64.rem_u (local.get $day) (i64.const 30)) (i64.const 1)))
+      ;; month bucket: (day / 30) mod 12 + 1
+      (local.set $month (i64.add (i64.rem_u (i64.div_u (local.get $day) (i64.const 30)) (i64.const 12)) (i64.const 1)))
+      (local.set $x (call $time_to_x (local.get $ts)))
+      ;; format MM/DD into scratch buffer (reuse 0x3F00)
+      ;; write month tens digit
+      (local.set $nc (i32.const 0))
+      (if (i64.ge_u (local.get $month) (i64.const 10))
+        (then
+          (i32.store8 (i32.const 0x3F00) (i32.wrap_i64 (i64.div_u (local.get $month) (i64.const 10))))
+          (local.set $nc (i32.const 1))))
+      (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc))
+        (i32.wrap_i64 (i64.rem_u (local.get $month) (i64.const 10))))
+      (local.set $nc (i32.add (local.get $nc) (i32.const 1)))
+      (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc)) (i32.const 12)) ;; '/' → use 'K' slot? no, use space
+      ;; Actually use '-' (idx 11) as separator
+      (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc)) (i32.const 11))
+      (local.set $nc (i32.add (local.get $nc) (i32.const 1)))
+      ;; day-of-month tens
+      (if (i64.ge_u (local.get $dom) (i64.const 10))
+        (then
+          (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc))
+            (i32.wrap_i64 (i64.div_u (local.get $dom) (i64.const 10))))
+          (local.set $nc (i32.add (local.get $nc) (i32.const 1)))))
+      (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc))
+        (i32.wrap_i64 (i64.rem_u (local.get $dom) (i64.const 10))))
+      (local.set $nc (i32.add (local.get $nc) (i32.const 1)))
+      ;; draw centered under X
+      (call $draw_rstr (i32.add (local.get $x) (i32.const 1))
+        (i32.add (i32.add (call $cy) (call $cah)) (i32.const 2))
+        (local.get $nc) (local.get $col))
+      (local.set $i (i32.add (local.get $i) (local.get $step)))
+      (br $lp))))
+
+  ;; Indicator sub-panel: grid + labels
+  (func $render_ind_panel_grid
+    (local $gc i32) (local $py i32) (local $ph i32)
+    (if (i32.eqz (call $ind_ps)) (then (return)))
+    (local.set $gc (call $grid_col))
+    (local.set $py (i32.add (call $cy) (call $cah)))
+    (local.set $ph (call $ind_ph))
+    ;; outline
+    (call $draw_rect_outline (call $cx) (local.get $py) (call $caw) (local.get $ph) (local.get $gc))
+    ;; mid-line
+    (call $draw_hline (call $cx) (i32.add (call $cx) (call $caw))
+      (i32.add (local.get $py) (i32.shr_u (local.get $ph) (i32.const 1))) (local.get $gc)))
+
+  ;; Map a value to the indicator panel Y coordinate
+  (func $ind_val_to_py (param $val f64) (result i32)
+    (local $mn f64) (local $mx f64) (local $h i32) (local $base i32)
+    (local.set $mn   (call $ind_pmin))
+    (local.set $mx   (call $ind_pmax))
+    (local.set $h    (call $ind_ph))
+    (local.set $base (i32.add (call $cy) (call $cah)))
+    (if (f64.eq (local.get $mn) (local.get $mx))
+      (then (return (i32.add (local.get $base) (i32.shr_u (local.get $h) (i32.const 1))))))
+    (i32.add (local.get $base)
+      (i32.sub (i32.sub (local.get $h) (i32.const 1))
+        (i32.trunc_sat_f64_s
+          (f64.mul
+            (f64.div (f64.sub (local.get $val) (local.get $mn))
+                     (f64.sub (local.get $mx) (local.get $mn)))
+            (f64.convert_i32_s (local.get $h)))))))
+
+  ;; Standalone volume chart that fills the full chart area (chart_type = 4)
+  (func $render_volume_main
+    (local $id i32) (local $n i32) (local $s i32) (local $e i32) (local $i i32)
+    (local $p i32) (local $ts i64) (local $vol f64) (local $open f64) (local $close f64)
+    (local $x i32) (local $bw i32) (local $vbase i32) (local $vh i32)
+    (local $col i32) (local $vpy i32) (local $maxvol f64)
+    (local.set $id (call $active_ds))
+    (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return)))
+    (if (call $ds_type_of (local.get $id)) (then (return)))  ;; OHLCV only
+    (local.set $n (call $ds_cnt (local.get $id)))
+    (if (i32.eqz (local.get $n)) (then (return)))
+    (local.set $s (call $ds_lower_bound (local.get $id) (call $view_s)))
+    (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
+    (if (i32.gt_s (local.get $s) (local.get $e)) (then (return)))
+    (local.set $vh    (call $cah))
+    (local.set $vbase (i32.sub (i32.add (call $cy) (call $cah)) (i32.const 1)))
+    (local.set $bw (call $max_i32 (i32.const 1)
+      (i32.sub (i32.div_u (call $caw)
+        (i32.add (i32.sub (local.get $e) (local.get $s)) (i32.const 1))) (i32.const 1))))
+    ;; find max volume
+    (local.set $maxvol (f64.const 1.0))
+    (local.set $i (local.get $s))
+    (block $b1 (loop $l1
+      (br_if $b1 (i32.gt_s (local.get $i) (local.get $e)))
+      (local.set $vol (f64.load offset=40 (call $ds_rec_ptr (local.get $id) (local.get $i))))
+      (if (f64.gt (local.get $vol) (local.get $maxvol)) (then (local.set $maxvol (local.get $vol))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l1)))
+    (local.set $i (local.get $s))
+    (block $b2 (loop $l2
+      (br_if $b2 (i32.gt_s (local.get $i) (local.get $e)))
+      (local.set $p     (call $ds_rec_ptr (local.get $id) (local.get $i)))
+      (local.set $ts    (i64.load (local.get $p)))
+      (local.set $open  (f64.load offset=8  (local.get $p)))
+      (local.set $close (f64.load offset=32 (local.get $p)))
+      (local.set $vol   (f64.load offset=40 (local.get $p)))
+      (local.set $x (call $time_to_x (local.get $ts)))
+      (local.set $vpy
+        (i32.sub (local.get $vbase)
+          (i32.trunc_sat_f64_s
+            (f64.mul (f64.div (local.get $vol) (local.get $maxvol))
+                     (f64.convert_i32_s (local.get $vh))))))
+      (local.set $col (select (call $up_col) (call $dn_col)
+        (f64.ge (local.get $close) (local.get $open))))
+      (local.set $col (call $pack_rgba
+        (call $ch_r (local.get $col)) (call $ch_g (local.get $col))
+        (call $ch_b (local.get $col)) (i32.const 200)))
+      (call $draw_rect
+        (i32.sub (local.get $x) (i32.shr_s (local.get $bw) (i32.const 1)))
+        (local.get $vpy)
+        (local.get $bw)
+        (i32.add (i32.sub (local.get $vbase) (local.get $vpy)) (i32.const 1))
+        (local.get $col))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l2))))
+
   ;; ── grid ──────────────────────────────────────────────────────────────
   (func $render_grid
     (local $gc i32) (local $step i32) (local $i i32) (local $y i32)
@@ -1080,12 +1461,21 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
+  ;; Returns typical time step for dataset (first two bars; 0 if fewer than 2 bars)
+  (func $ds_typical_step (param $id i32) (result i64)
+    (if (i32.lt_s (call $ds_cnt (local.get $id)) (i32.const 2)) (then (return (i64.const 0))))
+    (i64.sub
+      (i64.load (call $ds_rec_ptr (local.get $id) (i32.const 1)))
+      (i64.load (call $ds_rec_ptr (local.get $id) (i32.const 0)))))
+
   ;; ── line chart ────────────────────────────────────────────────────────
+  ;; Segments that span more than 2× the typical step are skipped (visible gap).
   (func $render_line
     (local $id i32) (local $n i32) (local $s i32) (local $e i32) (local $i i32)
-    (local $p i32) (local $ts i64) (local $val f64)
+    (local $p i32) (local $ts i64) (local $val f64) (local $prev_ts i64)
     (local $x i32) (local $y i32) (local $px i32) (local $py i32)
     (local $col i32) (local $r i32) (local $g i32) (local $b i32)
+    (local $step i64) (local $thresh i64)
     (local.set $id (call $active_ds))
     (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return)))
     (local.set $n (call $ds_cnt (local.get $id)))
@@ -1093,48 +1483,14 @@
     (local.set $s (call $ds_lower_bound (local.get $id) (call $view_s)))
     (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
     (if (i32.gt_s (local.get $s) (local.get $e)) (then (return)))
+    (local.set $step   (call $ds_typical_step (local.get $id)))
+    (local.set $thresh (i64.mul (local.get $step) (i64.const 2)))
     (local.set $col (call $ln_col))
     (local.set $r (call $ch_r (local.get $col)))
     (local.set $g (call $ch_g (local.get $col)))
     (local.set $b (call $ch_b (local.get $col)))
-    (local.set $px (i32.const -1))
-    (local.set $i (local.get $s))
-    (block $brk (loop $lp
-      (br_if $brk (i32.gt_s (local.get $i) (local.get $e)))
-      (local.set $p (call $ds_rec_ptr (local.get $id) (local.get $i)))
-      (local.set $ts  (i64.load (local.get $p)))
-      (local.set $val (call $ds_val (local.get $id) (local.get $i)))
-      (local.set $x (call $time_to_x (local.get $ts)))
-      (local.set $y (call $price_to_y (local.get $val)))
-      (if (i32.ge_s (local.get $px) (i32.const 0))
-        (then (call $draw_aa_line (local.get $px) (local.get $py)
-                (local.get $x) (local.get $y) (local.get $r) (local.get $g) (local.get $b))))
-      (local.set $px (local.get $x))
-      (local.set $py (local.get $y))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $lp))))
-
-  ;; ── area chart ────────────────────────────────────────────────────────
-  (func $render_area
-    (local $id i32) (local $n i32) (local $s i32) (local $e i32) (local $i i32)
-    (local $p i32) (local $ts i64) (local $val f64)
-    (local $x i32) (local $y i32) (local $px i32) (local $py i32)
-    (local $col i32) (local $fill i32) (local $r i32) (local $g i32) (local $b i32)
-    (local $base_y i32)
-    (local.set $id (call $active_ds))
-    (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return)))
-    (local.set $n (call $ds_cnt (local.get $id)))
-    (if (i32.eqz (local.get $n)) (then (return)))
-    (local.set $s (call $ds_lower_bound (local.get $id) (call $view_s)))
-    (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
-    (if (i32.gt_s (local.get $s) (local.get $e)) (then (return)))
-    (local.set $col (call $ln_col))
-    (local.set $r (call $ch_r (local.get $col)))
-    (local.set $g (call $ch_g (local.get $col)))
-    (local.set $b (call $ch_b (local.get $col)))
-    (local.set $fill (call $pack_rgba (local.get $r) (local.get $g) (local.get $b) (i32.const 55)))
-    (local.set $base_y (i32.sub (i32.add (call $cy) (call $cah)) (i32.const 1)))
-    (local.set $px (i32.const -1))
+    (local.set $px      (i32.const -1))
+    (local.set $prev_ts (i64.const 0))
     (local.set $i (local.get $s))
     (block $brk (loop $lp
       (br_if $brk (i32.gt_s (local.get $i) (local.get $e)))
@@ -1145,12 +1501,66 @@
       (local.set $y (call $price_to_y (local.get $val)))
       (if (i32.ge_s (local.get $px) (i32.const 0))
         (then
-          (call $fill_trapezoid (local.get $px) (local.get $py)
-            (local.get $x) (local.get $y) (local.get $base_y) (local.get $fill))
-          (call $draw_aa_line (local.get $px) (local.get $py)
-            (local.get $x) (local.get $y) (local.get $r) (local.get $g) (local.get $b))))
-      (local.set $px (local.get $x))
-      (local.set $py (local.get $y))
+          ;; If gap > 2× step, break the polyline (visible gap = no interpolation across weekends etc.)
+          (if (i32.or
+                (i64.eqz (local.get $step))
+                (i64.le_s (i64.sub (local.get $ts) (local.get $prev_ts)) (local.get $thresh)))
+            (then (call $draw_aa_line (local.get $px) (local.get $py)
+                    (local.get $x) (local.get $y) (local.get $r) (local.get $g) (local.get $b)))
+            (else (local.set $px (i32.const -1))))))  ;; skip segment, reset pen
+      (local.set $px      (local.get $x))
+      (local.set $py      (local.get $y))
+      (local.set $prev_ts (local.get $ts))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))))
+
+  ;; ── area chart ────────────────────────────────────────────────────────
+  ;; Same gap-aware rendering: skip fill and outline for segments crossing gaps.
+  (func $render_area
+    (local $id i32) (local $n i32) (local $s i32) (local $e i32) (local $i i32)
+    (local $p i32) (local $ts i64) (local $val f64) (local $prev_ts i64)
+    (local $x i32) (local $y i32) (local $px i32) (local $py i32)
+    (local $col i32) (local $fill i32) (local $r i32) (local $g i32) (local $b i32)
+    (local $base_y i32) (local $step i64) (local $thresh i64)
+    (local.set $id (call $active_ds))
+    (if (i32.lt_s (local.get $id) (i32.const 0)) (then (return)))
+    (local.set $n (call $ds_cnt (local.get $id)))
+    (if (i32.eqz (local.get $n)) (then (return)))
+    (local.set $s (call $ds_lower_bound (local.get $id) (call $view_s)))
+    (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
+    (if (i32.gt_s (local.get $s) (local.get $e)) (then (return)))
+    (local.set $step   (call $ds_typical_step (local.get $id)))
+    (local.set $thresh (i64.mul (local.get $step) (i64.const 2)))
+    (local.set $col (call $ln_col))
+    (local.set $r (call $ch_r (local.get $col)))
+    (local.set $g (call $ch_g (local.get $col)))
+    (local.set $b (call $ch_b (local.get $col)))
+    (local.set $fill (call $pack_rgba (local.get $r) (local.get $g) (local.get $b) (i32.const 55)))
+    (local.set $base_y (i32.sub (i32.add (call $cy) (call $cah)) (i32.const 1)))
+    (local.set $px      (i32.const -1))
+    (local.set $prev_ts (i64.const 0))
+    (local.set $i (local.get $s))
+    (block $brk (loop $lp
+      (br_if $brk (i32.gt_s (local.get $i) (local.get $e)))
+      (local.set $p (call $ds_rec_ptr (local.get $id) (local.get $i)))
+      (local.set $ts  (i64.load (local.get $p)))
+      (local.set $val (call $ds_val (local.get $id) (local.get $i)))
+      (local.set $x (call $time_to_x (local.get $ts)))
+      (local.set $y (call $price_to_y (local.get $val)))
+      (if (i32.ge_s (local.get $px) (i32.const 0))
+        (then
+          (if (i32.or
+                (i64.eqz (local.get $step))
+                (i64.le_s (i64.sub (local.get $ts) (local.get $prev_ts)) (local.get $thresh)))
+            (then
+              (call $fill_trapezoid (local.get $px) (local.get $py)
+                (local.get $x) (local.get $y) (local.get $base_y) (local.get $fill))
+              (call $draw_aa_line (local.get $px) (local.get $py)
+                (local.get $x) (local.get $y) (local.get $r) (local.get $g) (local.get $b)))
+            (else (local.set $px (i32.const -1))))))
+      (local.set $px      (local.get $x))
+      (local.set $py      (local.get $y))
+      (local.set $prev_ts (local.get $ts))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
@@ -1169,7 +1579,11 @@
     (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
     (if (i32.gt_s (local.get $s) (local.get $e)) (then (return)))
     (local.set $vh    (call $vol_h))
-    (local.set $vbase (i32.sub (i32.add (call $cy) (call $cah) ) (i32.const 0)))
+    ;; vbase = bottom of volume panel (cy + cah + ind_panel_h + vol_h - 1)
+    (local.set $vbase (i32.sub
+      (i32.add (i32.add (call $cy) (call $cah))
+               (select (call $ind_ph) (i32.const 0) (call $ind_ps)))
+      (i32.const 0)))
     (local.set $vbase (i32.add (local.get $vbase) (local.get $vh)))
     (local.set $vbase (i32.sub (local.get $vbase) (i32.const 1)))
     (local.set $vc (i32.add (i32.sub (local.get $e) (local.get $s)) (i32.const 1)))
@@ -1281,9 +1695,14 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
-  ;; render all indicators
+  ;; render all indicators — overlay (SMA/EMA/BB) in main chart, RSI/MACD in sub-panel
   (func $render_indicators
     (local $n i32) (local $i i32) (local $ip i32) (local $type i32)
+    (local $cnt i32) (local $out i32) (local $dp i32) (local $col i32)
+    (local $dsid i32) (local $s i32) (local $j i32)
+    (local $ts i64) (local $val f64) (local $x i32) (local $y i32)
+    (local $px i32) (local $py i32) (local $hist_ptr i32)
+    (local $zero_y i32) (local $hy i32) (local $hcol i32)
     (local.set $n (call $ind_count))
     (local.set $i (i32.const 0))
     (block $brk (loop $lp
@@ -1292,21 +1711,103 @@
       (if (i32.load offset=60 (local.get $ip))
         (then
           (local.set $type (i32.load offset=4 (local.get $ip)))
-          ;; SMA / EMA / RSI / MACD main → offset 0
-          (if (i32.or (i32.le_s (local.get $type) (i32.const 1))
-                      (i32.ge_s (local.get $type) (i32.const 5)))
+          ;; SMA / EMA only → single line in price space (offset 0)
+          (if (i32.le_s (local.get $type) (i32.const 1))
             (then (call $render_ind_line (local.get $i) (i32.const 0))))
-          ;; BB: render mid(0), upper(1), lower(2)
+          ;; BB: mid(0), upper(1), lower(2) in price space
           (if (i32.eq (local.get $type) (i32.const 2))
             (then
               (call $render_ind_line (local.get $i) (i32.const 0))
               (call $render_ind_line (local.get $i) (i32.const 1))
               (call $render_ind_line (local.get $i) (i32.const 2))))
-          ;; MACD: signal (offset 1) and histogram as bars drawn separately below
+          ;; RSI: render in indicator sub-panel (if active), else price space
+          (if (i32.eq (local.get $type) (i32.const 5))
+            (then
+              (if (call $ind_ps)
+                (then (call $render_ind_panel_line (local.get $i) (i32.const 0)))
+                (else (call $render_ind_line (local.get $i) (i32.const 0))))))
+          ;; MACD: line + signal in sub-panel; histogram bars in sub-panel
           (if (i32.eq (local.get $type) (i32.const 6))
             (then
-              (call $render_ind_line (local.get $i) (i32.const 0))
-              (call $render_ind_line (local.get $i) (i32.const 1))))))
+              (if (call $ind_ps)
+                (then
+                  (call $render_ind_panel_line (local.get $i) (i32.const 0))
+                  (call $render_ind_panel_line (local.get $i) (i32.const 1))
+                  ;; histogram bars (offset 2 = out + cnt*16)
+                  (local.set $ip   (call $ind_ptr (local.get $i)))
+                  (local.set $out  (i32.load offset=48 (local.get $ip)))
+                  (local.set $cnt  (i32.load offset=52 (local.get $ip)))
+                  (local.set $dsid (i32.load offset=8  (local.get $ip)))
+                  (local.set $col  (i32.load offset=16 (local.get $ip)))
+                  (local.set $hist_ptr (i32.add (local.get $out) (i32.shl (i32.mul (local.get $cnt) (i32.const 2)) (i32.const 3))))
+                  (local.set $zero_y (call $ind_val_to_py (f64.const 0)))
+                  (local.set $s (call $ds_lower_bound (local.get $dsid) (call $view_s)))
+                  (local.set $j (local.get $s))
+                  (block $hbrk (loop $hlp
+                    (br_if $hbrk (i32.ge_s (local.get $j) (call $ds_cnt (local.get $dsid))))
+                    (local.set $ts  (i64.load (call $ds_rec_ptr (local.get $dsid) (local.get $j))))
+                    (if (i64.gt_s (local.get $ts) (call $view_e)) (then (br $hbrk)))
+                    (local.set $val (f64.load (i32.add (local.get $hist_ptr) (i32.shl (local.get $j) (i32.const 3)))))
+                    (if (f64.ne (local.get $val) (f64.const 0))
+                      (then
+                        (local.set $x (call $time_to_x (local.get $ts)))
+                        (local.set $hy (call $ind_val_to_py (local.get $val)))
+                        (local.set $hcol (select
+                          (call $pack_rgba (i32.const 38) (i32.const 166) (i32.const 154) (i32.const 180))
+                          (call $pack_rgba (i32.const 239) (i32.const 83) (i32.const 80) (i32.const 180))
+                          (f64.ge (local.get $val) (f64.const 0))))
+                        (call $draw_rect
+                          (i32.sub (local.get $x) (i32.const 1))
+                          (call $min_i32 (local.get $hy) (local.get $zero_y))
+                          (i32.const 2)
+                          (call $max_i32 (i32.const 1)
+                            (call $abs_i32 (i32.sub (local.get $hy) (local.get $zero_y))))
+                          (local.get $hcol))))
+                    (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                    (br $hlp))))
+                (else
+                  ;; No sub-panel: draw MACD line and signal in price space
+                  (call $render_ind_line (local.get $i) (i32.const 0))
+                  (call $render_ind_line (local.get $i) (i32.const 1))))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp))))
+
+  ;; render a single indicator line that maps values to the INDICATOR SUB-PANEL
+  (func $render_ind_panel_line (param $ii i32) (param $offset_mult i32)
+    (local $ip i32) (local $dp i32) (local $cnt i32) (local $col i32)
+    (local $dsid i32) (local $s i32)
+    (local $r i32) (local $g i32) (local $b i32)
+    (local $i i32) (local $ts i64) (local $val f64)
+    (local $x i32) (local $y i32) (local $px i32) (local $py i32)
+    (local.set $ip  (call $ind_ptr (local.get $ii)))
+    (local.set $cnt (i32.load offset=52 (local.get $ip)))
+    (if (i32.eqz (local.get $cnt)) (then (return)))
+    (local.set $col  (i32.load offset=16 (local.get $ip)))
+    (local.set $dsid (i32.load offset=8  (local.get $ip)))
+    (local.set $s    (call $ds_lower_bound (local.get $dsid) (call $view_s)))
+    (local.set $dp
+      (i32.add (i32.load offset=48 (local.get $ip))
+               (i32.shl (i32.mul (local.get $offset_mult) (local.get $cnt)) (i32.const 3))))
+    (local.set $r (call $ch_r (local.get $col)))
+    (local.set $g (call $ch_g (local.get $col)))
+    (local.set $b (call $ch_b (local.get $col)))
+    (local.set $px (i32.const -1))
+    (local.set $i  (local.get $s))
+    (block $brk (loop $lp
+      (br_if $brk (i32.ge_s (local.get $i) (call $ds_cnt (local.get $dsid))))
+      (local.set $ts  (i64.load (call $ds_rec_ptr (local.get $dsid) (local.get $i))))
+      (if (i64.gt_s (local.get $ts) (call $view_e)) (then (br $brk)))
+      (local.set $val (f64.load (i32.add (local.get $dp) (i32.shl (local.get $i) (i32.const 3)))))
+      (if (f64.ne (local.get $val) (f64.const 0))
+        (then
+          (local.set $x (call $time_to_x (local.get $ts)))
+          (local.set $y (call $ind_val_to_py (local.get $val)))
+          (if (i32.ge_s (local.get $px) (i32.const 0))
+            (then (call $draw_aa_line (local.get $px) (local.get $py)
+                    (local.get $x) (local.get $y) (local.get $r) (local.get $g) (local.get $b))))
+          (local.set $px (local.get $x))
+          (local.set $py (local.get $y)))
+        (else (local.set $px (i32.const -1))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $lp))))
 
@@ -1331,9 +1832,9 @@
     ;; bounds check
     (if (i32.or
           (i32.or (i32.lt_s (local.get $x) (call $cx))
-                  (i32.gt_s (local.get $x) (i32.add (call $cx) (call $caw))))
+                  (i32.ge_s (local.get $x) (i32.add (call $cx) (call $caw))))
           (i32.or (i32.lt_s (local.get $y) (call $cy))
-                  (i32.gt_s (local.get $y) (i32.add (call $cy) (call $cah)))))
+                  (i32.ge_s (local.get $y) (i32.add (call $cy) (call $cah)))))
       (then (return (i32.const -1))))
     (local.set $ts (call $x_to_time (local.get $x)))
     (local.set $idx (call $ds_upper_bound (local.get $id) (local.get $ts)))
@@ -1352,11 +1853,20 @@
     (if (i32.eq (call $chart_type) (i32.const 3))
       (then (call $render_ohlc_bar)))
     (if (i32.eq (call $chart_type) (i32.const 4))
+      (then (call $render_volume_main)))
+    (if (i32.eq (call $chart_type) (i32.const 5))
       (then (call $render_scatter)))
-    ;; volume panel
-    (if (call $show_vol) (then (call $render_volume)))
+    ;; volume overlay panel (not drawn when standalone volume is the chart type)
+    (if (i32.and (call $show_vol)
+                 (i32.ne (call $chart_type) (i32.const 4)))
+      (then (call $render_volume)))
+    ;; indicator sub-panel grid
+    (call $render_ind_panel_grid)
     ;; indicators
     (call $render_indicators)
+    ;; axis labels
+    (call $render_price_labels)
+    (call $render_time_labels)
     ;; crosshair on top
     (call $render_crosshair))
 )

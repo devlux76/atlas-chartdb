@@ -18,7 +18,7 @@
     ├─ addIndicator                   0x003100  scratch area
     ├─ setChartType / fitToData       0x010000  framebuffer (RGBA, up to 2048×1024)
     ├─ pan / zoom events         ◄──  0x810000  dataset + indicator value storage
-    └─ render() → blit to canvas
+    └─ render() → blit to canvas      0x3E00    3×5 pixel font bitmaps
 ```
 
 **No third-party charting runtime.** Every pixel is written by the WAT module.
@@ -32,9 +32,9 @@
 |------|-------------|
 | **Candlestick** | Full OHLC body + wicks, coloured by up/down |
 | **OHLC Bar** | Traditional bar chart with open/close ticks |
-| **Line** | Xiaolin Wu anti-aliased polyline |
+| **Line** | Xiaolin Wu anti-aliased polyline; gaps detected by time-step |
 | **Area** | Anti-aliased line + filled trapezoid gradient |
-| **Volume** | Semi-transparent colour-coded volume bars |
+| **Volume** | Standalone full-height colour-coded volume bar chart |
 | **Scatter** | Dot-per-close-price scatter plot |
 
 ### Technical indicators (computed in `.wat`)
@@ -45,6 +45,14 @@
 | **Bollinger Bands** (mid / upper / lower) | 2 |
 | **RSI** – Relative Strength Index (Wilder smoothing) | 5 |
 | **MACD** – line / signal / histogram | 6 |
+
+RSI and MACD render in a **dedicated indicator sub-panel** (auto-enabled when the indicator is added). The sub-panel is auto-scaled to the indicator's value range.
+
+### Axis labels
+A compact **3×5 pixel font** is baked into WAT; price labels appear on the Y axis and date labels on the X axis — no dependency on canvas font rendering.
+
+### Gap-aware rendering
+Line and Area charts detect time gaps larger than 2× the expected bar step (e.g. weekend gaps in stock data) and break the polyline at those points rather than drawing misleading interpolated segments.
 
 ### Interaction
 - **Scroll to zoom** (centred on cursor)
@@ -67,8 +75,8 @@ const id = await chart.loadFromOpfs("btc-daily"); // reads back without re-parsi
 ## Quick start
 
 ```bash
-npm install
-npm run dev          # compiles .wat → .wasm, starts Vite dev server on :3001
+bun install
+bun run dev          # compiles .wat → .wasm, starts Vite dev server on :3000
 ```
 
 ```ts
@@ -88,6 +96,9 @@ chart.addIndicator({ type: IndicatorType.SMA, dsId, period: 20,
                      color: packRGBA(255, 220, 50) });
 chart.addIndicator({ type: IndicatorType.BB,  dsId, period: 20,
                      color: packRGBA(130, 100, 220), param1: 2.0 });
+// RSI/MACD automatically open an indicator sub-panel:
+chart.addIndicator({ type: IndicatorType.RSI, dsId, period: 14,
+                     color: packRGBA(50, 200, 220) });
 
 // Fit to all data and render
 chart.fitToData(dsId);
@@ -98,9 +109,9 @@ chart.fitToData(dsId);
 ## Build
 
 ```bash
-npm run build:wat    # wat → public/atlas-chart.wasm  (uses wabt npm package)
-npm run build:ts     # tsc type-check + vite bundle
-npm run build        # both
+bun run build:wat    # wat → public/atlas-chart.wasm  (uses wabt npm package via Bun)
+bun run build:ts     # tsc type-check + vite bundle
+bun run build        # both
 ```
 
 ### Binary format (.bin)
@@ -108,7 +119,7 @@ npm run build        # both
 | Offset | Size | Field |
 |--------|------|-------|
 | 0 | 4 B | Magic `ATLC` (0x434C5441) |
-| 4 | 4 B | Version `DB10` |
+| 4 | 4 B | Version `DB10` (0x30314244) |
 | 8 | 4 B | Dataset type (0=OHLCV, 1=TimeValue) |
 | 12 | 8 B | Record count (i64) |
 | 20 | 8 B | Timestamp start (ms, i64) |
@@ -118,15 +129,12 @@ npm run build        # both
 
 ---
 
-## TODO / Roadmap
+## Roadmap
 
-- [ ] Time-series interpolation / gap-filling (RRD-style) in WAT
-- [ ] Bitmap font renderer in WAT for axis labels
 - [ ] Logarithmic price scale
 - [ ] Horizontal / vertical alert lines
 - [ ] Multi-dataset overlay (e.g., two instruments on one chart)
 - [ ] WebWorker offload for indicator computation on large datasets
 - [ ] Stochastic, ATR, VWAP indicators
-- [ ] Right-side price axis tick rendering in WAT
 - [ ] Dark/light theme toggle in demo UI
 

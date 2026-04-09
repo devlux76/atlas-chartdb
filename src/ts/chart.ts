@@ -140,10 +140,17 @@ export class AtlasChart extends EventTarget {
     this._requireReady();
     const data = await readDatasetBin(name);
     if (!data) return -1;
-    // Copy the bin file into WASM scratch memory (reuse a large scratch area)
-    const mem = new Uint8Array(this.wasm.memory.buffer);
-    // find a safe staging area: just above scratch start
+    // Ensure WASM memory is large enough for the staging area + payload.
+    // Framebuffer starts at 0x010000; staging is at 0x3200 (well before framebuffer).
+    // If data is large we grow memory so the copy stays inside bounds.
     const staging = 0x3200;
+    const needed  = staging + data.length;
+    const memPages = this.wasm.memory.buffer.byteLength; // current size in bytes
+    if (needed > memPages) {
+      const extra = Math.ceil((needed - memPages) / 65536);
+      this.wasm.memory.grow(extra);
+    }
+    const mem = new Uint8Array(this.wasm.memory.buffer);
     mem.set(data, staging);
     return this.wasm.load_bin(staging, data.length);
   }
@@ -153,11 +160,18 @@ export class AtlasChart extends EventTarget {
    */
   async saveToOpfs(dsId: number, name: string): Promise<void> {
     this._requireReady();
-    // Upper bound for serialised size: header (72) + 65535 records × 48 bytes = ~3MB
+    const cnt  = this.wasm.get_ds_record_count(dsId);
     const staging = 0x3200;
+    // Header (72 B) + records (max 48 B each)
+    const required = staging + 72 + cnt * 48;
+    const memPages = this.wasm.memory.buffer.byteLength;
+    if (required > memPages) {
+      const extra = Math.ceil((required - memPages) / 65536);
+      this.wasm.memory.grow(extra);
+    }
     const written = this.wasm.serialize_dataset(dsId, staging);
     if (written < 0) throw new Error(`serialize_dataset returned ${written}`);
-    const mem = new Uint8Array(this.wasm.memory.buffer);
+    const mem   = new Uint8Array(this.wasm.memory.buffer);
     const slice = mem.slice(staging, staging + written);
     await writeDatasetBin(name, slice);
   }
@@ -214,8 +228,20 @@ export class AtlasChart extends EventTarget {
       opts.param1 ?? 0, opts.param2 ?? 0, opts.param3 ?? 0,
     );
     this.wasm.compute_indicators();
+    // Auto-show the indicator sub-panel for RSI (5) and MACD (6)
+    if (opts.type === 5 || opts.type === 6) {
+      this.wasm.set_ind_panel(1, 70);
+      this.wasm.auto_scale_ind_panel();
+    }
     this._markDirty();
     return id;
+  }
+
+  /** Manually configure the indicator sub-panel height; pass show=false to hide it. */
+  setIndicatorPanel(show: boolean, height = 70): void {
+    this._requireReady();
+    this.wasm.set_ind_panel(show ? 1 : 0, height);
+    this._markDirty();
   }
 
   removeIndicator(indId: number): void {
@@ -305,9 +331,11 @@ export class AtlasChart extends EventTarget {
 
   private _canvasXY(e: MouseEvent | Touch): { x: number; y: number } {
     const r = this.canvas.getBoundingClientRect();
+    const scaleX = r.width  > 0 ? this.canvas.width  / r.width  : 1;
+    const scaleY = r.height > 0 ? this.canvas.height / r.height : 1;
     return {
-      x: Math.round(e.clientX - r.left),
-      y: Math.round(e.clientY - r.top),
+      x: Math.round((e.clientX - r.left) * scaleX),
+      y: Math.round((e.clientY - r.top)  * scaleY),
     };
   }
 

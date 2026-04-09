@@ -11,7 +11,9 @@ export async function writeDatasetBin(name: string, data: Uint8Array): Promise<v
   const writable = await (fh as FileSystemFileHandle & {
     createWritable(): Promise<FileSystemWritableFileStream>;
   }).createWritable();
-  await writable.write(data.buffer as ArrayBuffer);
+  // Write as ArrayBuffer to satisfy strict FileSystemWritableFileStream typings.
+  // data.slice() creates a fresh view backed by a plain ArrayBuffer.
+  await writable.write(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer);
   await writable.close();
 }
 
