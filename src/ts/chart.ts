@@ -145,9 +145,9 @@ export class AtlasChart extends EventTarget {
     // If data is large we grow memory so the copy stays inside bounds.
     const staging = 0x3200;
     const needed  = staging + data.length;
-    const memPages = this.wasm.memory.buffer.byteLength; // current size in bytes
-    if (needed > memPages) {
-      const extra = Math.ceil((needed - memPages) / 65536);
+    const memBytes = this.wasm.memory.buffer.byteLength; // current size in bytes
+    if (needed > memBytes) {
+      const extra = Math.ceil((needed - memBytes) / 65536);
       this.wasm.memory.grow(extra);
     }
     const mem = new Uint8Array(this.wasm.memory.buffer);
@@ -164,9 +164,9 @@ export class AtlasChart extends EventTarget {
     const staging = 0x3200;
     // Header (72 B) + records (max 48 B each)
     const required = staging + 72 + cnt * 48;
-    const memPages = this.wasm.memory.buffer.byteLength;
-    if (required > memPages) {
-      const extra = Math.ceil((required - memPages) / 65536);
+    const memBytes = this.wasm.memory.buffer.byteLength;
+    if (required > memBytes) {
+      const extra = Math.ceil((required - memBytes) / 65536);
       this.wasm.memory.grow(extra);
     }
     const written = this.wasm.serialize_dataset(dsId, staging);

@@ -97,7 +97,8 @@
   (func $ind_ph   (result i32) (i32.load  offset=148 (i32.const 0))) ;; indicator panel height
   (func $ind_pmin (result f64) (f64.load  offset=152 (i32.const 0))) ;; indicator panel y min
   (func $ind_pmax (result f64) (f64.load  offset=160 (i32.const 0))) ;; indicator panel y max
-  ;; text colour (set by set_theme as the $text parameter, stored at offset 84)
+  ;; text colour — stored by set_theme as its 3rd parameter ($text), at offset 84
+  ;; (layout: bg=64, grid=68, up=72, dn=76, line=80, text=84)
   (func $text_col (result i32) (i32.load  offset=84  (i32.const 0)))
 
   (func $recalc_chart_area
@@ -1066,7 +1067,9 @@
 
   ;; ── 3×5 pixel font (15-bit row-major bitmaps, stored at 0x3E00) ────────────
   ;; Index:  0-9 = digits, 10='.', 11='-', 12=' ', 13=':', 14='K', 15='M'
-  ;; Encoding: bits[14:12]=row0, bits[11:9]=row1, …, bits[2:0]=row4  (MSB=left)
+  ;; Encoding: each glyph is stored in a 32-bit word; only bits [14:0] are used.
+  ;; Row r occupies bits [(4-r)*3+2 : (4-r)*3].  Within each 3-bit group:
+  ;;   bit 2 = LEFT pixel, bit 1 = MIDDLE pixel, bit 0 = RIGHT pixel.
   (func $init_font
     (i32.store (i32.const 0x3E00) (i32.const 31599))  ;; '0' ###/#.#/#.#/#.#/###
     (i32.store (i32.const 0x3E04) (i32.const 11415))  ;; '1' .#./##./.#./.#./###
@@ -1254,8 +1257,7 @@
       (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc))
         (i32.wrap_i64 (i64.rem_u (local.get $month) (i64.const 10))))
       (local.set $nc (i32.add (local.get $nc) (i32.const 1)))
-      (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc)) (i32.const 12)) ;; '/' → use 'K' slot? no, use space
-      ;; Actually use '-' (idx 11) as separator
+      ;; '-' separator (font index 11)
       (i32.store8 (i32.add (i32.const 0x3F00) (local.get $nc)) (i32.const 11))
       (local.set $nc (i32.add (local.get $nc) (i32.const 1)))
       ;; day-of-month tens
@@ -1579,13 +1581,13 @@
     (local.set $e (call $ds_upper_bound (local.get $id) (call $view_e)))
     (if (i32.gt_s (local.get $s) (local.get $e)) (then (return)))
     (local.set $vh    (call $vol_h))
-    ;; vbase = bottom of volume panel (cy + cah + ind_panel_h + vol_h - 1)
-    (local.set $vbase (i32.sub
-      (i32.add (i32.add (call $cy) (call $cah))
-               (select (call $ind_ph) (i32.const 0) (call $ind_ps)))
-      (i32.const 0)))
-    (local.set $vbase (i32.add (local.get $vbase) (local.get $vh)))
-    (local.set $vbase (i32.sub (local.get $vbase) (i32.const 1)))
+    ;; vbase = bottom of volume panel (cy + cah + ind_panel_h_if_shown + vol_h - 1)
+    (local.set $vbase
+      (i32.sub
+        (i32.add
+          (i32.add (call $cy) (call $cah))
+          (i32.add (select (call $ind_ph) (i32.const 0) (call $ind_ps)) (local.get $vh)))
+        (i32.const 1)))
     (local.set $vc (i32.add (i32.sub (local.get $e) (local.get $s)) (i32.const 1)))
     (local.set $bw (call $max_i32 (i32.const 1)
       (i32.sub (i32.div_u (call $caw) (local.get $vc)) (i32.const 1))))
